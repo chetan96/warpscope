@@ -1,154 +1,192 @@
-# News
-Updated NVBit to 1.7.7.3: This may cause GPU functions to not be instrumented on CUDA versions below 13. If you encounter an issue, use an older version of Nixnan or upgrade CUDA to version 13+.
+# Warpscope
 
-# About
-A tool designed to provide a new framework for floating-point exceptional-value detection.
-The tool uses [NVbit](https://github.com/NVlabs/NVBit) in order to instrument Nvidia CUDA programs.
-The goals are to add more support for instructions (and instruction types) from [GPU-FPX]() in a more general framework that will allow new instrumentation passes to be added.
+A standalone [NVBit](https://github.com/NVlabs/NVBit)-based tool for detecting idle GPU warps and recommending warp specialization strategies for CUDA kernels.
 
-# Requirements
-Linux on x86 with Cuda version 12 and compute capability greater than or equal to 8.6.
-ARM should work, but will replacing the x86 version of NVbit downloaded by `make`.
+Forked from [Nixnan](https://github.com/LLNL/nixnan) (floating-point exception detector). Warpscope adds a new NVBit tool that instruments CUDA kernels at the binary level to measure per-warp execution time, identify underutilized warps, and suggest producer/consumer warp splits for optimization.
 
-# Setup
-Run `make` in the root directory.
-This should produce a file in the main director called `nixnan.so`.
-This is the instrumentation library.
-(The older detector and analyzer are located in nvbit_release/tools/GPU-FPX.)
+## What It Does
 
-# Usage
-In the `examples` directory, run the following command:
-```nvcc -arch=compute_86 -lineinfo basic.cu -o basic```
-Then run:
-```LD_PRELOAD=../nixnan.so basic```
-You should then get something like the following:
-```
------ Test overflow: A[0,0]=max_normal, B[0,0]=max_normal, C[0,0]=0 -----
-A[0,0] = 65504.000000 (0x7bff), B[0,0] = 65504.000000 (0x7bff), C[0,0] = 0.000000 (0x0000)
-Computing D = A * B + C with Tensor Cores...
-#nixnan: Initializing GPU context...
-#nixnan: Could not open kernel_whitelist.txt!
-#nixnan: Could not open kernel_blacklist.txt!
-#nixnan: instrumenting all kernels
-#nixnan: running kernel [WMMAF16TensorCore] ...
-#nixnan: error [infinity] detected in instruction HMMA.16816.F16 R20, R4.reuse, R16, RZ ; in function WMMAF16TensorCore at line 0 of type f16
-#nixnan: error [infinity] detected in instruction HMMA.16816.F16 R8, R4.reuse, R16, R8 ; in function WMMAF16TensorCore at line 0 of type f16
-D[0,0]=inf (0x7c00)
---------------------------------------------------------------------------------
------ Test NaN: A[0,0]=inf, B[0,0]=1, C[0,0]=-inf -----
-A[0,0] = inf (0x7c00), B[0,0] = 1.000000 (0x3c00), C[0,0] = -inf (0xfc00)
-Computing D = A * B + C with Tensor Cores...
-#nixnan: error [NaN,infinity] detected in instruction HMMA.16816.F16 R20, R4.reuse, R16, RZ ; in function WMMAF16TensorCore at line 0 of type f16
-#nixnan: error [NaN] detected in instruction HMMA.16816.F16 R22, R4, R18, RZ ; in function WMMAF16TensorCore at line 0 of type f16
-D[0,0]=nan (0x7fff)
---------------------------------------------------------------------------------
------ Test underflow mul: A[0,0]=min_normal, B[0,0]=0.5, C[0,0]=0.0 -----
-A[0,0] = 0.000061 (0x0400), B[0,0] = 0.500000 (0x3800), C[0,0] = 0.000000 (0x0000)
-Computing D = A * B + C with Tensor Cores...
-#nixnan: error [subnormal] detected in instruction HMMA.16816.F16 R20, R4.reuse, R16, RZ ; in function WMMAF16TensorCore at line 0 of type f16
-#nixnan: error [subnormal] detected in instruction HMMA.16816.F16 R8, R4.reuse, R16, R8 ; in function WMMAF16TensorCore at line 0 of type f16
-D[0,0]=0.000031 (0x0200)
---------------------------------------------------------------------------------
------ Test underflow mul: A[0,0]=neg_min_normal, B[0,0]=0.5, C[0,0]=0.0 -----
-A[0,0] = -0.000061 (0x8400), B[0,0] = 0.500000 (0x3800), C[0,0] = 0.000000 (0x0000)
-Computing D = A * B + C with Tensor Cores...
-D[0,0]=-0.000031 (0x8200)
---------------------------------------------------------------------------------
------ Test underflow mul: A[0,0]=min_subnormal, B[0,0]=0.5, C[0,0]=0.0 -----
-A[0,0] = 0.000000 (0x0001), B[0,0] = 0.500000 (0x3800), C[0,0] = 0.000000 (0x0000)
-Computing D = A * B + C with Tensor Cores...
-D[0,0]=0.000000 (0x0000)
---------------------------------------------------------------------------------
------ Test underflow mul: A[0,0]=neg_min_subnormal, B[0,0]=0.5, C[0,0]=0.0 -----
-A[0,0] = -0.000000 (0x8001), B[0,0] = 0.500000 (0x3800), C[0,0] = 0.000000 (0x0000)
-Computing D = A * B + C with Tensor Cores...
-D[0,0]=0.000000 (0x0000)
---------------------------------------------------------------------------------
-#nixnan: Finalizing GPU context...
+1. **Idle Warp Detection** -- Injects `clock64()` timing probes at the first instruction (`IPOINT_BEFORE`) and every `EXIT`/`RET`/`BRK` instruction of each kernel. Measures per-warp duration and flags warps below a utilization threshold as "idle".
 
-#nixnan: ------------ nixnan Report -----------
+2. **Cross-Run Consistency Tracking** -- Runs the same kernel multiple times and identifies warps that are *consistently* idle, confirming the pattern is deterministic and exploitable.
 
-#nixnan: --- FP16 Operations ---
-#nixnan: NaN: 4
-#nixnan: Infinity: 3
-#nixnan: Subnormal: 2
-#nixnan: Division by 0: 0
+3. **Warp Specialization Recommendations** -- Classifies the workload pattern (`causal_triangle`, `uniform_idle`, `divergent`, `balanced`) and suggests how to split warps into producers (data loaders) and consumers (compute).
 
-#nixnan: --- FP32 Operations ---
-#nixnan: NaN: 0
-#nixnan: Infinity: 0
-#nixnan: Subnormal: 0
-#nixnan: Division by 0: 0
+4. **JSON Reports** -- Optionally outputs a machine-readable JSON report with per-block producer/consumer recommendations.
 
-#nixnan: --- FP64 Operations ---
-#nixnan: NaN: 0
-#nixnan: Infinity: 0
-#nixnan: Subnormal: 0
-#nixnan: Division by 0: 0
-```
+No source code modification is needed -- warpscope instruments any CUDA binary at runtime via `LD_PRELOAD`.
 
-The tool notifies the user of detected errors in the program.
-For example in:
-`#nixnan: error [infinity] detected in instruction HMMA.16816.F16 R20, R4.reuse, R16, RZ ; in function WMMAF16TensorCore at line 0 of type f16`
-An infinity was detected arising in a 16-bit matrix-multiply-and-accumulate instruction.
+## Requirements
 
-The summary at the end indicates that there were four NaN values, three infinity values and two subnormal values generated during program execution.
+- Linux x86_64
+- CUDA 13+ (CUDA 12 may work but NVBit 1.7.7.3 recommends 13+)
+- GPU with compute capability >= 8.6 (Ampere, Ada Lovelace, Hopper)
 
-# FP Exponent Histogramming
+## Setup
 
-Nixnan now has the facility to track FP exponent binades. This can be controlled with the 
-`HISTOGRAM` and `BIN_SPEC_FILE` environment variables.
-
-## Whole program histogramming
-The `HISTOGRAM` variable enables
-general tracking of exponents encountered per format in a CUDA program's execution,
-producing a summary of the results at the end of execution. For example
 ```bash
-$ HISTOGRAM=1 LD_PRELOAD=nixnan.so half-matmul
-...
-#nixnan: --- FP16 Memory  Operations ---
-#nixnan: NaN:                    4 (60 repeats)
-#nixnan: --- BF16 Memory  Operations ---
-#nixnan: NaN:                    0 (0 repeats)
-#nixnan: --- FP32 Memory  Operations ---
-#nixnan: NaN:                    0 (0 repeats)
-#nixnan: --- FP64 Memory  Operations ---
-#nixnan: NaN:                    0 (0 repeats)
+# Build everything (downloads NVBit automatically)
+make
 
-#nixnan: --- FP exponent ranges --- 
-#nixnan: Exponent range for f16: [-5, 3]
-$
+# Or build just warpscope
+cd nvbit_release/tools/warpscope
+make ARCH=sm_89   # Set to your GPU's SM version
 ```
-Shows that in this program, the exponent range of the f16 format is between -5 and 3.
 
-## Targeted range warning
-The `BIN_SPEC_FILE` is a JSON file specification for which exponent ranges should
-be tracked per format, and the frequency of when these fill. This variable expects
-a path to a file containing the specification. If the file does not exist,
-then it will be created and filled in with a template for the specification for what
-exponent ranges per format should be tracked, and how often they should be reported.
+This produces `warpscope.so` in the project root.
 
-For example:
+## Usage
+
+```bash
+# Basic usage -- instrument any CUDA program
+LD_PRELOAD=warpscope.so ./your_cuda_program
+
+# Custom idle threshold (default 0.5 = 50%)
+WARPSCOPE_THRESHOLD=0.3 LD_PRELOAD=warpscope.so ./your_program
+
+# Output JSON recommendations to a file
+WARPSCOPE_JSON=report.json LD_PRELOAD=warpscope.so ./your_program
+
+# Redirect human-readable output to a log file
+WARPSCOPE_LOGFILE=warpscope.log LD_PRELOAD=warpscope.so ./your_program
+
+# Only instrument specific kernels
+WARPSCOPE_KERNEL=flash_attention_causal_fwd LD_PRELOAD=warpscope.so ./your_program
+
+# Verbose mode (show per-instruction details)
+WARPSCOPE_VERBOSE=1 LD_PRELOAD=warpscope.so ./your_program
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `WARPSCOPE_THRESHOLD` | `0.5` | Utilization fraction below which a warp is "idle" (0.0-1.0) |
+| `WARPSCOPE_VERBOSE` | `0` | Verbosity level (0=normal, 1=detailed) |
+| `WARPSCOPE_LOGFILE` | stderr | Path to redirect human-readable output |
+| `WARPSCOPE_JSON` | (none) | Path for JSON recommendation report |
+| `WARPSCOPE_KERNEL` | (all) | Comma-separated kernel name whitelist |
+
+## Example Output
+
+### Causal (Decoder) Flash Attention
+
+```bash
+$ LD_PRELOAD=warpscope.so ./flash_attention_causal
+
+#warpscope: --- Warp Utilization Report: kernel [flash_attention_causal_fwd] ---
+#warpscope: Total warps: 16 | Idle (<50% utilization): 8 | Partial occupancy: 0
+#warpscope: Max warp duration: 3250346629 cycles
+
+#warpscope: Idle warps (candidates for warp specialization):
+#warpscope:        Block    Warp    SM      Duration     Util%   ActiveThreads
+#warpscope:      (0,0,0)       1     0     670603387     20.6%      32/32
+#warpscope:      (0,0,0)       0     0     670603394     20.6%      32/32
+#warpscope:      (1,0,0)       3     2    1506517739     46.3%      32/32
+#warpscope:      (1,0,0)       0     2    1506517757     46.3%      32/32
+
+#warpscope: Busiest warps:
+#warpscope:      (3,0,0)       1     6    3250346629    100.0%      32/32
+```
+
+### Specialization Recommendation
+
+```
+#warpscope: ========== Warp Specialization Recommendations ==========
+
+#warpscope: Kernel [flash_attention_causal_fwd] (3 runs)
+#warpscope:   Pattern: causal_triangle
+#warpscope:   Avg idle fraction: 50.0%
+#warpscope:   Consistency score: 1.00
+#warpscope:   >> RECOMMENDATION: Enable warp specialization
+#warpscope:   >> Suggested split: 8 producer warps, 8 consumer warps
+#warpscope:   >> Strategy: Use position-dependent producer/consumer ratio.
+#warpscope:      Early blocks (low sequence positions) -> more producers (prefetch K/V tiles).
+#warpscope:      Late blocks (high sequence positions) -> more consumers (full compute).
+```
+
+### JSON Output
+
 ```json
 {
-    "count": 128,
-    "bf16": [],
-    "f16": [[0,5],[-4,-1]],
-    "f32": [],
-    "f64": []
+  "tool": "warpscope",
+  "kernels": [{
+    "name": "flash_attention_causal_fwd",
+    "num_runs": 3,
+    "consistency_score": 1.00,
+    "recommend_specialization": true,
+    "pattern": "causal_triangle",
+    "avg_idle_fraction": 0.500,
+    "blocks": [
+      {"block": [0,0,0], "total_warps": 4, "idle_warps": 4, "suggested_producers": 3, "suggested_consumers": 1},
+      {"block": [1,0,0], "total_warps": 4, "idle_warps": 4, "suggested_producers": 3, "suggested_consumers": 1},
+      {"block": [2,0,0], "total_warps": 4, "idle_warps": 0, "suggested_producers": 0, "suggested_consumers": 4},
+      {"block": [3,0,0], "total_warps": 4, "idle_warps": 0, "suggested_producers": 0, "suggested_consumers": 4}
+    ]
+  }]
 }
 ```
-will track exponent in the ranges [0,5] and [-4,-1] for the f16 format. The `"count"`
-entry means that exponents in a range are reported every 128 hits.
 
-An example use is:
+## Example Programs
+
+The `examples/` directory contains test cases:
+
+| File | Description |
+|---|---|
+| `flash_attention_causal.cu` | Causal (decoder) Flash Attention 2 with shared memory -- shows ~50% idle warps from the triangular causal mask |
+| `idle_warp_test.cu` | Synthetic tests: imbalanced, divergent, and tail-effect kernels |
+| `idle_warp_ml.cu` | Real ML patterns: MoE routing, padded batch attention, speculative decoding, sparse attention, token pruning |
+| `basic.cu` | Tensor core FP16 matrix multiply (from nixnan) |
+
+Compile and run any example:
+
 ```bash
-$ BIN_SPEC_FILE=./spec.json HISTOGRAM=1 LD_PRELOAD=nixnan.so half-matmul
-...
-#nixnan: f16 bin has reached threshold: kernel=WMMAF16TensorCore range=[0,5] count=128
-#nixnan: f16 bin has reached threshold: kernel=WMMAF16TensorCore range=[-4,-1] count=128
-#nixnan: f16 bin has reached threshold: kernel=WMMAF16TensorCore range=[0,5] count=128
-...
+cd examples
+nvcc -arch=compute_89 -lineinfo flash_attention_causal.cu -o flash_attention_causal
+LD_PRELOAD=../warpscope.so ./flash_attention_causal
 ```
-This shows that the threshold was reached twice in the [0,5] range and once in 
-the [-4,-1] range.
+
+## How It Works
+
+Warpscope uses NVBit to instrument CUDA kernels at the GPU binary (SASS) level:
+
+1. **At kernel launch**, warpscope iterates over all SASS instructions and injects:
+   - `warpscope_timer_start()` at `IPOINT_BEFORE` on the first instruction -- records `clock64()`, `get_warpid()`, `get_smid()`, active thread count via `__popc(__activemask())`
+   - `warpscope_timer_end()` at `IPOINT_BEFORE` on every `EXIT`/`RET`/`BRK` instruction -- captures end timestamp
+
+2. **After kernel completion**, the host reads the managed memory buffer containing per-warp timing records, computes utilization as `duration / max_duration`, and flags warps below the threshold.
+
+3. **Across multiple runs**, the tool tracks which warps are consistently idle and computes a consistency score.
+
+4. **At program exit**, the specialization engine classifies the workload pattern and outputs recommendations.
+
+## Workload Patterns Detected
+
+| Pattern | Description | Example |
+|---|---|---|
+| `causal_triangle` | Early blocks idle, late blocks busy (monotonically increasing utilization) | Decoder-style causal attention |
+| `uniform_idle` | Entire blocks are idle while others are fully busy | MoE with imbalanced routing, token pruning |
+| `divergent` | Alternating idle/busy warps within blocks | Kernels with branch divergence |
+| `tail_idle` | Last warps in blocks are idle | Tail effects from non-aligned problem sizes |
+| `balanced` | All warps well-utilized | Encoder-style full attention |
+
+## Project Structure
+
+```
+nvbit_release/tools/warpscope/
+    warpscope.cu         # Main NVBit tool (callbacks, instrumentation)
+    inject_funcs.cu      # Device-side timer functions
+    warp_timing.cuh      # Shared data structures (managed memory)
+    analysis.cu/cuh      # Per-kernel analysis, cross-run tracking
+    specialization.cu/cuh # Pattern classification, recommendations
+    wsout.cc/hh          # Logging helpers
+    Makefile             # Build
+```
+
+## Nixnan (Original Tool)
+
+The original Nixnan FP exception detector is still available at `nvbit_release/tools/nixnan/`. See the nixnan-specific documentation in `Tutorial.md`.
+
+## License
+
+See [LICENSE](LICENSE).

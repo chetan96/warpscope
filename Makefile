@@ -1,6 +1,6 @@
 # .PHONY: NVBIT GPU-FPX 
 
-all:analyzer detector nixnan nixnan.so
+all:analyzer detector nixnan nixnan.so warpscope warpscope.so
 
 nvbit_version = 1.7.7.3
 
@@ -24,6 +24,14 @@ nixnan.so: $(nvbit_tool)/nixnan/nixnan.so
 
 $(nvbit_tool)/nixnan/nixnan.so: $(nvbit_tool)/nixnan/nixnan.cu $(nvbit_tar)
 	cd $(nvbit_tool)/nixnan; \
+	$(MAKE)
+
+warpscope: $(nvbit_tool)/warpscope/warpscope.so
+warpscope.so: $(nvbit_tool)/warpscope/warpscope.so
+	ln -sf $(nvbit_tool)/warpscope/warpscope.so warpscope.so
+
+$(nvbit_tool)/warpscope/warpscope.so: $(nvbit_tool)/warpscope/warpscope.cu $(nvbit_tar)
+	cd $(nvbit_tool)/warpscope; \
 	$(MAKE)
 
 $(nvbit_tar):

@@ -1,581 +1,419 @@
-# Nixnan Tutorial: Comprehensive Guide to GPU Floating-Point Exception Detection
-### Authored by Claude (that might lie) with human edits (that could be fallible - tagged [HE])
+# Warpscope & Nixnan Tutorial
+### Comprehensive Guide to GPU Warp Analysis and Floating-Point Exception Detection
 
 ## Table of Contents
 
 1. [Introduction](#introduction)
-2. [Background: Why Floating-Point Exception Detection Matters](#background)
-3. [System Requirements](#system-requirements)
-4. [Installation](#installation)
-5. [Basic Usage](#basic-usage)
-6. [Environment Variables Reference](#environment-variables-reference)
-7. [Advanced Features](#advanced-features)
-8. [Understanding the Output](#understanding-the-output)
-9. [Case Studies and Debugging Workflows](#case-studies)
-10. [Performance Considerations](#performance-considerations)
-11. [Troubleshooting](#troubleshooting)
-12. [References](#references)
+2. [Part I: Warpscope — Idle Warp Detection & Specialization](#warpscope)
+   - [Background: Why Warp Utilization Matters](#warp-background)
+   - [Installation](#warpscope-installation)
+   - [Basic Usage](#warpscope-usage)
+   - [Environment Variables](#warpscope-env-vars)
+   - [Understanding the Output](#warpscope-output)
+   - [Workload Pattern Classification](#warpscope-patterns)
+   - [Case Studies](#warpscope-case-studies)
+   - [JSON Report Format](#warpscope-json)
+3. [Part II: Nixnan — Floating-Point Exception Detection](#nixnan)
+   - [Background: Why FP Exception Detection Matters](#fp-background)
+   - [Basic Usage](#nixnan-usage)
+   - [Environment Variables](#nixnan-env-vars)
+   - [Advanced Features](#nixnan-advanced)
+   - [Case Studies](#nixnan-case-studies)
+4. [How NVBit Instrumentation Works](#nvbit-internals)
+5. [Performance Considerations](#performance)
+6. [Troubleshooting](#troubleshooting)
+7. [References](#references)
 
 ---
 
 ## Introduction <a name="introduction"></a>
 
-Nixnan is a binary instrumentation tool for detecting floating-point exceptional values (NaN, Infinity, Subnormals, Division-by-Zero) in NVIDIA CUDA programs. Built on top of NVBit (NVIDIA Binary Instrumentation Tool), nixnan provides runtime detection capabilities without requiring source code modification or recompilation.
+This repository contains two standalone NVBit tools for GPU program analysis:
 
-### Key Features
+| Tool | Purpose | Location |
+|------|---------|----------|
+| **Warpscope** | Idle warp detection and warp specialization recommendations | `nvbit_release/tools/warpscope/` |
+| **Nixnan** | Floating-point exception detection (NaN, Inf, subnormal, div-by-zero) | `nvbit_release/tools/nixnan/` |
 
-- **Binary-level instrumentation**: Works with closed-source CUDA libraries
-- **Multiple precision support**: Detects exceptions in FP16, FP32, and FP64 operations
-- **Tensor Core support**: Monitors MMA (Matrix Multiply-Accumulate) instructions including HMMA operations
-- **Exponent histogram tracking**: Monitors numerical ranges during execution
-- **Source line information**: Reports exception locations with file and line numbers (when debug info available)
-- **Low overhead modes**: Sampling support for reduced performance impact
-- **Exceptions being written into memory**: Reports exceptions flowing into memory via STG ("store global") [HE]
+Both tools use [NVBit](https://github.com/NVlabs/NVBit) to instrument CUDA programs at the GPU binary (SASS) level via `LD_PRELOAD` — no source code modification or recompilation needed.
 
----
+### System Requirements
 
-## Background: Why Floating-Point Exception Detection Matters <a name="background"></a>
+- **OS**: Linux x86_64
+- **CUDA**: 13+ recommended (12 may work but NVBit 1.7.7.3 recommends 13+)
+- **GPU**: Compute capability >= 8.6 (Ampere, Ada Lovelace, Hopper)
+- **Build**: GCC, Make, nvcc
 
-### The Problem
-
-GPUs are now the dominant platform for machine learning and high-performance computing workloads. Unfortunately, NVIDIA GPUs do not have hardware-level exception trap mechanisms. This means:
-
-1. **Silent failures**: Exceptional values (NaN, INF) can propagate through computations undetected
-2. **Unreliable results**: Programs may produce normal-looking outputs that are actually corrupted
-3. **Difficult debugging**: Without trapping, locating the source of exceptions is extremely challenging
-4. **Closed-source barriers**: Many GPU libraries are binary-only, making source-level debugging impossible
-
-### Types of Floating-Point Exceptions
-
-According to IEEE 754, there are five types of floating-point exceptions:
-
-| Exception | Description | Exceptional Value |
-|-----------|-------------|-------------------|
-| **Invalid Operation** | Mathematically undefined (e.g., sqrt(-1), 0/0) | NaN |
-| **Division by Zero** | Non-zero divided by zero | Infinity (INF) |
-| **Overflow** | Result exceeds representable range | Infinity (INF) |
-| **Underflow** | Result too small to represent normally | Subnormal [HE] |
-| **Inexact** | Result requires rounding | Rounded value |
-
-### Why This Matters for ML and HPC
-
-Consider this common scenario in machine learning:
-
-```python
-# Uninitialized tensor - carries garbage values
-x = torch.FloatTensor(20, 32, 128).cuda()
-# This may contain uninitialized values that may propagate, later generating NaNs [HE]
-```
-
-Or in numerical algorithms:
-
-```c
-// Division without zero-check
-const float recipPrecision = 0.5f / eb;  // If eb is subnormal or zero, this couldexplode [HE]
-```
-
-Tools like nixnan help identify these issues before they cause training failures or incorrect scientific results.
-
-### How Binary Instrumentation Helps
-
-Unlike source-level analysis, binary instrumentation:
-
-1. **Works on closed-source code**: Libraries like cuBLAS, cuSPARSE, cuDNN
-2. **Sees optimized code**: Catches issues introduced by compiler optimizations
-3. **Detects precision changes**: Finds when FP64 operations are downgraded to FP32
-4. **Monitors actual execution**: Not static analysis - catches runtime-dependent issues
-
----
-
-## System Requirements <a name="system-requirements"></a>
-
-- **Operating System**: Linux on x86_64
-- **CUDA Version**: 12.x or compatible
-- **Compute Capability**: >= 8.6 (Ampere or newer recommended)
-- **GPU Driver**: Compatible with CUDA 12
-- **Build Tools**: GCC, Make
-
-[HE] : removed mention of ARM
----
-
-## Installation <a name="installation"></a>
-
-### Building from Source
+### Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/parfloat/nixnan.git
-cd nixnan
-
-# Build the instrumentation library
+# Build both tools
 make
 
-# This produces nixnan.so in nvbit_release/tools/nixnan/
+# Run any CUDA program with warpscope
+LD_PRELOAD=warpscope.so ./your_program
+
+# Run any CUDA program with nixnan
+LD_PRELOAD=nixnan.so ./your_program
 ```
 
-### Verifying the Installation
+---
+
+## Part I: Warpscope — Idle Warp Detection & Specialization <a name="warpscope"></a>
+
+### Background: Why Warp Utilization Matters <a name="warp-background"></a>
+
+A GPU executes threads in groups of 32 called **warps**. When a kernel launches, the GPU scheduler assigns warps to Streaming Multiprocessors (SMs). In an ideal kernel, all warps do equal work. In practice, several common patterns cause warp imbalance:
+
+| Pattern | Cause | Example |
+|---------|-------|---------|
+| **Causal mask** | Decoder attention: query i attends to keys 0..i only | GPT, LLaMA, Mistral |
+| **Token pruning** | Skipping "easy" tokens at intermediate layers | DynamicViT, early-exit transformers |
+| **MoE routing** | Uneven token distribution across experts | Mixtral, Switch Transformer |
+| **Padded batching** | Variable-length sequences padded to max length | Production LLM serving |
+| **Speculative decoding** | Rejected candidate tokens skip verification | Medusa, EAGLE |
+
+Idle warps waste GPU cycles. **Warp specialization** repurposes these idle warps as data prefetchers — they load the next tile of data into shared memory while the busy warps compute on the current tile. This is the core technique behind Flash Attention 3.
+
+Warpscope automatically detects which warps are idle, whether the pattern is consistent, and recommends producer/consumer splits.
+
+### Installation <a name="warpscope-installation"></a>
 
 ```bash
-# Compile the basic example
+git clone <your-fork-url>
+cd warpscope
+
+# Build (downloads NVBit automatically on first run)
+make
+
+# Or build only warpscope with a specific GPU architecture
+cd nvbit_release/tools/warpscope
+make ARCH=sm_89    # RTX 4090
+# make ARCH=sm_86  # RTX 3090 / A100
+# make ARCH=sm_90  # H100
+```
+
+This produces `warpscope.so` in the project root.
+
+### Basic Usage <a name="warpscope-usage"></a>
+
+```bash
+# Instrument any CUDA program
+LD_PRELOAD=warpscope.so ./your_cuda_program
+
+# With a PyTorch script
+LD_PRELOAD=warpscope.so python train.py
+
+# Generate JSON report
+WARPSCOPE_JSON=report.json LD_PRELOAD=warpscope.so ./your_program
+```
+
+### Environment Variables <a name="warpscope-env-vars"></a>
+
+| Variable | Default | Description |
+|---|---|---|
+| `WARPSCOPE_THRESHOLD` | `0.5` | Utilization fraction below which a warp is "idle" (0.0–1.0) |
+| `WARPSCOPE_VERBOSE` | `0` | Verbosity (0=normal, 1=per-function instrumentation details) |
+| `WARPSCOPE_LOGFILE` | stderr | Redirect output to a file |
+| `WARPSCOPE_JSON` | (none) | Path for JSON recommendation report |
+| `WARPSCOPE_KERNEL` | (all) | Comma-separated kernel name whitelist |
+
+### Understanding the Output <a name="warpscope-output"></a>
+
+Warpscope produces three sections of output:
+
+#### 1. Per-Kernel Warp Utilization Report
+
+Printed after each kernel completes:
+
+```
+#warpscope: --- Warp Utilization Report: kernel [flash_attention_causal_fwd] ---
+#warpscope: Total warps: 32 | Idle (<50% utilization): 16 | Partial occupancy: 0
+#warpscope: Max warp duration: 13108278004 cycles
+
+#warpscope: Idle warps (candidates for warp specialization):
+#warpscope:        Block    Warp    SM      Duration     Util%   ActiveThreads
+#warpscope:      (0,0,0)       3     0    1253064546      9.6%      32/32
+#warpscope:      (1,0,0)       1     2    2850740116     21.7%      32/32
+#warpscope:      (2,0,0)       1     4    4520595942     34.5%      32/32
+#warpscope:      (3,0,0)       1     6    6190783424     47.2%      32/32
+
+#warpscope: Busiest warps:
+#warpscope:      (7,0,0)       2    14   13108278004    100.0%      32/32
+```
+
+**How to read this:**
+- **Block (0,0,0)**: The CUDA block coordinates (blockIdx.x, y, z)
+- **Warp 3**: Hardware warp ID within the SM
+- **SM 0**: Which Streaming Multiprocessor this warp ran on
+- **Duration**: Wall-clock cycles from first instruction to EXIT
+- **Util%**: `duration / max_duration_across_all_warps * 100`
+- **ActiveThreads**: How many of the 32 lanes were active at start/end
+
+#### 2. Cross-Run Summary
+
+Printed at program exit, aggregating all runs of each kernel:
+
+```
+#warpscope: ========== Warpscope Cross-Run Summary ==========
+#warpscope: Kernel [flash_attention_causal_fwd] - 3 run(s)
+#warpscope:   Run 1: 16/32 warps idle (50.0%)
+#warpscope:   Run 2: 16/32 warps idle (50.0%)
+#warpscope:   Run 3: 16/32 warps idle (50.0%)
+#warpscope:   >> CONSISTENT: 16 warps are idle in every run.
+```
+
+This confirms whether the pattern is deterministic (exploitable) or varies with scheduling (harder to optimize).
+
+#### 3. Specialization Recommendations
+
+```
+#warpscope: ========== Warp Specialization Recommendations ==========
+#warpscope: Kernel [flash_attention_causal_fwd] (3 runs)
+#warpscope:   Pattern: causal_triangle
+#warpscope:   Avg idle fraction: 50.0%
+#warpscope:   Consistency score: 1.00
+#warpscope:   >> RECOMMENDATION: Enable warp specialization
+#warpscope:   >> Suggested split: 16 producer warps, 16 consumer warps
+#warpscope:   >> Strategy: Use position-dependent producer/consumer ratio.
+```
+
+### Workload Pattern Classification <a name="warpscope-patterns"></a>
+
+Warpscope classifies idle warp patterns into five categories:
+
+| Pattern | What it looks like | Typical cause | Specialization strategy |
+|---|---|---|---|
+| `causal_triangle` | Blocks 0..N/2 are idle, N/2..N are busy. Utilization increases monotonically. | Causal (decoder) attention mask | Position-dependent split: early blocks = more producers, late blocks = more consumers |
+| `uniform_idle` | Entire blocks are idle while others are fully busy | MoE cold experts, token pruning | Idle blocks become full-time data prefetchers |
+| `divergent` | Within each block, some warps idle, others busy | Branch divergence, odd/even workload | Warp-ID-based producer/consumer branching within blocks |
+| `tail_idle` | Last few warps in blocks are idle | Non-aligned problem sizes (seq_len % block_m != 0) | Tail warps prefetch next tile |
+| `balanced` | All warps ~100% utilized | Well-optimized kernel | No specialization needed |
+
+### Case Studies <a name="warpscope-case-studies"></a>
+
+#### Case Study 1: Causal Flash Attention (Decoder Transformers)
+
+In decoder-style transformers (GPT, LLaMA), the attention mask is lower-triangular: query at position `i` only attends to keys `0..i`. This means:
+
+- Block 0 (rows 0–127): each thread attends to at most 128 keys (~13% of sequence)
+- Block 7 (rows 896–1023): each thread attends to up to 1024 keys (100%)
+
+```bash
 cd examples
-nvcc -arch=sm_86 -lineinfo basic.cu -o basic [HE: changed compute_86]
-
-# Run with nixnan instrumentation
-LD_PRELOAD=../nvbit_release/tools/nixnan/nixnan.so ./basic
+nvcc -arch=compute_89 -lineinfo flash_attention_causal.cu -o flash_attention_causal
+LD_PRELOAD=../warpscope.so ./flash_attention_causal
 ```
 
----
+**Result**: 50% idle warps, consistency score 1.00, pattern `causal_triangle`. Blocks handling early sequence positions finish 5–10x faster than blocks handling late positions, but are held at `__syncthreads()` barriers.
 
-## Basic Usage <a name="basic-usage"></a>
+**Why this matters**: This is exactly the insight that motivated Flash Attention 3's warp specialization — early-position warps can prefetch K/V tiles via TMA while late-position warps compute.
 
-### Running with Nixnan
-
-The simplest way to use nixnan is via `LD_PRELOAD`:
+#### Case Study 2: Divergent Workload
 
 ```bash
-LD_PRELOAD=/path/to/nixnan.so ./your_cuda_program [args]
+nvcc -arch=compute_89 -lineinfo idle_warp_test.cu -o idle_warp_test
+LD_PRELOAD=../warpscope.so ./idle_warp_test
 ```
 
-### Example with a PyTorch Script
+The divergent kernel assigns heavy work to even warps (2000 iterations) and light work to odd warps (10 iterations). Warpscope detects 16/32 warps at ~28% utilization with consistency score 1.00.
+
+#### Case Study 3: Token Pruning in FFN Layers
 
 ```bash
-LD_PRELOAD=/path/to/nixnan.so python train.py
+nvcc -arch=compute_89 -lineinfo idle_warp_ml.cu -o idle_warp_ml
+LD_PRELOAD=../warpscope.so ./idle_warp_ml
 ```
 
-### Additional material (presentations/projects) [this section is fully HE]
+When 50% of tokens are pruned at an FFN layer, blocks for pruned tokens skip the matrix multiply but are held at `__syncthreads()`. Warpscope identifies 34 consistently idle warps across runs.
 
-- This is a great source of info covering NixNan + other tools.
-  - [Our SC'25 tutorial listed at the top.](https://fpanalysistools.org)
-- Ask to be included in more projects in progress - send email to ganeshutah at gmail.
-  - Our [Private Github](https://github.com/parfloat/parfloat-class) 
- 
-### Example Output
-
-```
---- NVBit (NVidia Binary Instrumentation Tool v1.7.2) Loaded ---
-Running #nixnan: kernel [ampere_sgemm_32x128_nn] ...
-#nixnan LOC-EXCEP INFO: Warning: in kernel [ampere_sgemm_32x128_nn],
-  (SUB) found @ /unknown_path in [ampere_sgemm_32x128_nn]:0 [FP32]
-#nixnan LOC-EXCEP INFO: in kernel [ampere_sgemm_32x128_nn],
-  NaN found @ /source/file.cu:120 [FP32]
-
------------- Nixnan Report -----------
---- FP16 Operations ---
-Total NaN found: 0
-Total INF found: 0
-Total underflow (subnormal): 0
-Total Division by 0: 0
---- FP32 Operations ---
-Total NaN found: 2
-Total INF found: 1
-Total underflow (subnormal): 2
-Total Division by 0: 1
---- FP64 Operations ---
-Total NaN found: 0
-Total INF found: 0
-Total underflow (subnormal): 0
-Total Division by 0: 0
---- Other Stats ---
-Kernels: 4
-The total number of exceptions are: 128
-```
-
----
-
-## Environment Variables Reference <a name="environment-variables-reference"></a>
-
-Nixnan's behavior is controlled through environment variables. These are read at initialization using the NVBit `GET_VAR_INT` and `GET_VAR_STR` macros.
-
-### Instrumentation Control
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `INSTR_BEGIN` | Integer | 0 | Beginning of the instruction interval where to apply instrumentation |
-| `INSTR_END` | Integer | UINT32_MAX | End of the instruction interval where to apply instrumentation |
-| `SAMPLING` | Integer | 0 | Instrument a repeat kernel every SAMPLING times. Set to N to instrument only every Nth kernel invocation (reduces overhead for repeatedly-called kernels) |
-
-### Output and Debugging
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `TOOL_VERBOSE` | Integer | 0 | Enable verbosity inside the tool. Set to 1 for detailed instrumentation logs |
-| `ENABLE_FUN_DETAIL` | Integer | 0 | Enable detailed function information for kernel. Shows additional context about instrumented functions |
-| `PRINT_ILL_INSTR` | Integer | 0 | Print the instruction which caused the exception. Useful for debugging specific SASS instructions |
-| `LINE_INFO` | Integer | 0 | Enable debug information for source code locations. **Warning**: May cause crashes on some programs; set to 0 if you encounter issues |
-| `LOGFILE` | String | (stderr) | Path to the optional log file. Default is to print to stderr. Useful when the instrumented program is capturing stderr |
-
-### Memory Instrumentation
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `INSTR_MEM` | Integer | 0 | Instrument memory instructions for NaN/Inf detection. Monitors load/store operations for exceptional values |
-
-### Histogram Features
-
-| Variable | Type | Default | Description |
-|----------|------|---------|-------------|
-| `HISTOGRAM` | Integer | 0 | Enable whole-program exponent range tracking. Generates reports like "Exponent range for f16: [-5, 3]" |
-| `BIN_SPEC_FILE` | String | (none) | Path to JSON specification file for targeted range monitoring |
-
-### Usage Examples
+### JSON Report Format <a name="warpscope-json"></a>
 
 ```bash
-# Basic usage with verbose output
-TOOL_VERBOSE=1 LD_PRELOAD=./nixnan.so ./my_program
-
-# Enable source line information (compile with -lineinfo)
-LINE_INFO=1 LD_PRELOAD=./nixnan.so ./my_program
-
-# Sample every 64th kernel invocation (for long-running programs)
-SAMPLING=64 LD_PRELOAD=./nixnan.so ./my_program
-
-# Log to file instead of stderr
-LOGFILE=/tmp/nixnan.log LD_PRELOAD=./nixnan.so ./my_program
-
-# Enable memory instrumentation
-INSTR_MEM=1 LD_PRELOAD=./nixnan.so ./my_program
-
-# Limit instrumentation to specific instruction range
-INSTR_BEGIN=100 INSTR_END=500 LD_PRELOAD=./nixnan.so ./my_program
-
-# Enable histogram tracking
-HISTOGRAM=1 LD_PRELOAD=./nixnan.so ./my_program
-
-# Combined: verbose, line info, and logging
-TOOL_VERBOSE=1 LINE_INFO=1 LOGFILE=./debug.log LD_PRELOAD=./nixnan.so ./my_program
+WARPSCOPE_JSON=report.json LD_PRELOAD=warpscope.so ./your_program
 ```
-
----
-
-## Advanced Features <a name="advanced-features"></a>
-
-### Tensor Core Monitoring
-
-Nixnan supports instrumentation of Tensor Core operations, including:
-
-- **HMMA instructions**: Half-precision Matrix Multiply-Accumulate
-- **IMMA instructions**: Integer Matrix Multiply-Accumulate
-- **Various formats**: F16, BF16, TF32, F32 accumulation
-
-Example detection output:
-
-```
-HMMA.1688.F32.TF32 R4, R132.reuse, R2, R4 ; : MMA being used!
-#nixnan LOC-EXCEP INFO: in kernel [void cutlass::Kernel],
-  NaN found @ /unknown_path in [void cutlass::Kernel]:0 [FP32]
-```
-
-### Exponent Histogram Tracking
-
-#### Whole-Program Mode
-
-```bash
-HISTOGRAM=1 LD_PRELOAD=./nixnan.so ./my_program
-```
-
-Output:
-```
-Exponent range for f16: [-5, 3]
-Exponent range for f32: [-12, 15]
-Exponent range for f64: [-50, 100]
-```
-
-#### Targeted Range Monitoring
-
-Create a JSON specification file:
 
 ```json
 {
-  "f32": {
-    "ranges": [
-      {"min": -126, "max": -120, "report_frequency": 1000},
-      {"min": 120, "max": 127, "report_frequency": 100}
+  "tool": "warpscope",
+  "kernels": [{
+    "name": "flash_attention_causal_fwd",
+    "num_runs": 3,
+    "consistency_score": 1.00,
+    "recommend_specialization": true,
+    "pattern": "causal_triangle",
+    "avg_idle_fraction": 0.500,
+    "blocks": [
+      {
+        "block": [0, 0, 0],
+        "total_warps": 4,
+        "idle_warps": 4,
+        "compute_warps": 0,
+        "avg_idle_util": 0.096,
+        "avg_compute_util": 0.000,
+        "suggested_producers": 3,
+        "suggested_consumers": 1
+      }
     ]
-  },
-  "f16": {
-    "ranges": [
-      {"min": -14, "max": -10, "report_frequency": 500}
-    ]
-  }
+  }]
 }
 ```
 
-Run with specification:
+---
+
+## Part II: Nixnan — Floating-Point Exception Detection <a name="nixnan"></a>
+
+### Background <a name="fp-background"></a>
+
+NVIDIA GPUs lack hardware-level FP exception traps. Exceptional values (NaN, Inf) propagate silently through computations. Nixnan detects these at runtime by instrumenting every floating-point SASS instruction.
+
+### Basic Usage <a name="nixnan-usage"></a>
 
 ```bash
-BIN_SPEC_FILE=./ranges.json LD_PRELOAD=./nixnan.so ./my_program
+LD_PRELOAD=nixnan.so ./your_cuda_program
 ```
 
-### Memory Instrumentation Mode
+### Environment Variables <a name="nixnan-env-vars"></a>
 
-When `INSTR_MEM=1`, nixnan also monitors memory operations:
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `INSTR_BEGIN` | Integer | 0 | Beginning of instruction interval to instrument |
+| `INSTR_END` | Integer | UINT32_MAX | End of instruction interval |
+| `TOOL_VERBOSE` | Integer | 0 | Enable verbose output |
+| `ENABLE_FUN_DETAIL` | Integer | 0 | Show detailed function info |
+| `PRINT_ILL_INSTR` | Integer | 0 | Print the offending instruction |
+| `SAMPLING` | Integer | 0 | Instrument every Nth kernel invocation |
+| `INSTR_MEM` | Integer | 0 | Instrument memory load/store for NaN detection |
+| `HISTOGRAM` | Integer | 0 | Enable FP exponent range tracking |
+| `BIN_SPEC_FILE` | String | (none) | JSON spec for targeted range monitoring |
+| `LOGFILE` | String | stderr | Redirect output to file |
+| `LINE_INFO` | Integer | 1 | Enable source line info (may cause crashes, set to 0 if needed) |
+
+### Advanced Features <a name="nixnan-advanced"></a>
+
+#### Tensor Core Monitoring
+
+Nixnan instruments HMMA (half-precision MMA) instructions used by Tensor Cores:
+
+```
+#nixnan: error [infinity] detected in operand 0 of instruction
+  HMMA.16816.F16 R20, R4.reuse, R16, RZ ; in function WMMAF16TensorCore of type f16
+```
+
+#### Exponent Histogram Tracking
 
 ```bash
-INSTR_MEM=1 LD_PRELOAD=./nixnan.so ./my_program
+HISTOGRAM=1 LD_PRELOAD=nixnan.so ./your_program
 ```
 
-This detects exceptional values being loaded from or stored to GPU memory, helping identify:
-- Uninitialized memory containing NaN patterns
-- Corrupted data in global memory
-- Exception propagation through memory
+Outputs the exponent range per format (e.g., `Exponent range for f16: [-5, 3]`).
+
+#### Targeted Range Monitoring
+
+Create a JSON spec file:
+
+```json
+{
+    "count": 128,
+    "bf16": [],
+    "f16": [[0,5],[-4,-1]],
+    "f32": [],
+    "f64": []
+}
+```
+
+```bash
+BIN_SPEC_FILE=./spec.json HISTOGRAM=1 LD_PRELOAD=nixnan.so ./your_program
+```
+
+### Case Studies <a name="nixnan-case-studies"></a>
+
+#### Flash Attention with Extreme Inputs
+
+The `examples/basic.cu` test case injects extreme FP16 values into a tensor-core matrix multiply:
+
+```bash
+cd examples
+nvcc -arch=compute_89 -lineinfo basic.cu -o basic
+LD_PRELOAD=../nixnan.so ./basic
+```
+
+Nixnan detects:
+- **Infinity** from `max_normal * max_normal` overflow
+- **NaN** from `inf + (-inf)`
+- **Subnormals** from `min_normal * 0.5` underflow
 
 ---
 
-## Understanding the Output <a name="understanding-the-output"></a>
+## How NVBit Instrumentation Works <a name="nvbit-internals"></a>
 
-### Exception Location Information
+Both tools use NVBit's binary instrumentation framework:
 
-```
-#nixnan LOC-EXCEP INFO: in kernel [kernel_name],
-  NaN found @ /path/to/source.cu:120 [FP32]
-```
+1. **`LD_PRELOAD`** loads the tool as a shared library before the CUDA program starts
+2. **`nvbit_at_cuda_event()`** is called on every CUDA driver API call (kernel launches, memory ops, etc.)
+3. Before a kernel launches, the tool calls **`nvbit_get_instrs()`** to get all SASS instructions
+4. **`nvbit_insert_call()`** injects a device function call before or after specific instructions:
+   - `IPOINT_BEFORE`: call runs before the instruction
+   - `IPOINT_AFTER`: call runs after the instruction
+5. **`nvbit_add_call_arg_*()`** passes arguments (register values, constants, pointers) to the injected function
+6. The injected device function runs on the GPU alongside the original kernel code
 
-Components:
-- **kernel_name**: CUDA kernel where exception occurred
-- **path/to/source.cu:120**: Source file and line (if compiled with `-lineinfo`)
-- **FP32**: Floating-point precision (FP16, FP32, or FP64)
+**Warpscope** injects `clock64()` timing probes at the first instruction and every EXIT/RET/BRK instruction.
 
-### Final Report Format
-
-```
------------- Nixnan Report -----------
---- FP16 Operations ---
-Total NaN found: X
-Total INF found: X
-Total underflow (subnormal): X
-Total Division by 0: X
---- FP32 Operations ---
-...
---- FP64 Operations ---
-...
---- Other Stats ---
-Kernels: N
-The total number of exceptions are: M
-```
-
-### Severity Assessment
-
-| Exception | Severity | Typical Impact |
-|-----------|----------|----------------|
-| **NaN** | High | Computation is corrupted; NaN propagates |
-| **INF** | High | Overflow occurred; may cascade to NaN |
-| **Division by 0** | High | Usually indicates logic error |
-| **Subnormal** | Medium | Precision loss; may be flushed to zero |
+**Nixnan** injects FP classification checks (NaN, Inf, subnormal, div-by-zero) around every floating-point instruction.
 
 ---
 
-## Case Studies and Debugging Workflows <a name="case-studies"></a>
+## Performance Considerations <a name="performance"></a>
 
-### Case Study 1: SRU (Simple Recurrent Unit) NaN Issue
+| Tool | Mode | Typical Slowdown |
+|------|------|-----------------|
+| Warpscope | Default | 2–10x (only instruments first/last instructions) |
+| Nixnan | Basic detection | 10–50x (instruments every FP instruction) |
+| Nixnan | With line info | 20–100x |
+| Nixnan | With sampling=64 | 2–10x |
+| Nixnan | Memory instrumentation | 50–200x |
 
-**Problem**: NaN values appearing at the output of a PyTorch-based neural network.
-
-**Detection**:
-```bash
-LD_PRELOAD=./nixnan.so python run_sru.py
-```
-
-**Output**:
-```
-Running #nixnan: kernel [ampere_sgemm_32x128_nn] ...
-#nixnan LOC-EXCEP INFO: in kernel [ampere_sgemm_32x128_nn],
-  NaN found in [ampere_sgemm_32x128_nn]:0 [FP32]
-```
-
-**Root Cause**: The input tensor was created with uninitialized memory:
-```python
-x = torch.FloatTensor(20, 32, 128).cuda()  # WRONG: uninitialized
-```
-
-**Fix**:
-```python
-x = torch.randn(20, 32, 128).cuda()  # CORRECT: initialized
-```
-
-### Case Study 2: Lossy Data Compressor
-
-**Problem**: NaN exceptions in a GPU-based data compressor.
-
-**Detection with line info**:
-```bash
-LINE_INFO=1 LD_PRELOAD=./nixnan.so ./compressor
-```
-
-**Output**:
-```
-#nixnan LOC-EXCEP INFO: NaN appears at the destination @
-/home/user/compressor/main1.cu:120
-Instruction: FFMA R3, R4, -R0, 1 ;
-```
-
-**Root Cause**: Line 120 contained:
-```c
-const float recipPrecision = 0.5f / eb;  // eb was subnormal, causing INF
-```
-
-**Fix**: Add input validation for the error bound parameter.
-
-### Case Study 3: CUDA GMRES Solver
-
-**Problem**: Residual always NaN from the first iteration.
-
-**Detection**:
-```bash
-LD_PRELOAD=./nixnan.so ./gmres_solver
-```
-
-**Output**:
-```
-#nixnan LOC-EXCEP INFO: in kernel [csrsv2_solve_upper_nontrans_byLevel_kernel],
-  DIV0 found @ /unknown_path:0 [FP64]
-#nixnan LOC-EXCEP INFO: in kernel [MassIPTwoVec],
-  NaN found @ /home/user/customKernels.cu:31 [FP64]
-```
-
-**Root Cause**: Division by zero in LU factorization due to near-singular matrix.
-
-**Fix**: Used cuSparse's matrix diagonal boosting API:
-```c
-cusparseSetMatFillMode(descr, CUSPARSE_FILL_MODE_LOWER);
-cusparseXcsrilu02_zeroPivot(handle, info, &position);
-// Boost small pivots
-```
-
-### Debugging Workflow
-
-1. **Initial Detection**:
-   ```bash
-   LD_PRELOAD=./nixnan.so ./your_program
-   ```
-
-2. **Enable Line Information** (recompile with `-lineinfo`):
-   ```bash
-   nvcc -lineinfo -g your_program.cu -o your_program
-   LINE_INFO=1 LD_PRELOAD=./nixnan.so ./your_program
-   ```
-
-3. **Identify First Exception**: Look for the first `LOC-EXCEP INFO` message
-
-4. **Analyze Exception Flow**: Check if exceptions:
-   - Appear (generated fresh)
-   - Propagate (passed through operations)
-   - Disappear (masked by operations like FSEL)
-
-5. **Examine Instruction Context**:
-   ```bash
-   PRINT_ILL_INSTR=1 LD_PRELOAD=./nixnan.so ./your_program
-   ```
-
-6. **For Long-Running Programs, Use Sampling**:
-   ```bash
-   SAMPLING=64 LD_PRELOAD=./nixnan.so ./your_program
-   ```
-
----
-
-## Performance Considerations <a name="performance-considerations"></a>
-
-### Expected Overhead
-
-Binary instrumentation inherently adds overhead. Typical slowdowns:
-
-| Mode | Slowdown | Use Case |
-|------|----------|----------|
-| Basic detection | 10-50x | Development/debugging |
-| With line info | 20-100x | Detailed debugging |
-| With sampling=64 | 2-10x | Long-running programs |
-| Memory instrumentation | 50-200x | Deep analysis |
-
-### Reducing Overhead
-
-1. **Use Sampling for Repeated Kernels**:
-   ```bash
-   SAMPLING=256 LD_PRELOAD=./nixnan.so ./my_program
-   ```
-   This instruments only every 256th invocation of a kernel.
-
-2. **Limit Instruction Range**:
-   ```bash
-   INSTR_BEGIN=1000 INSTR_END=2000 LD_PRELOAD=./nixnan.so ./my_program
-   ```
-
-3. **Disable Line Info** (if causing issues):
-   ```bash
-   LINE_INFO=0 LD_PRELOAD=./nixnan.so ./my_program
-   ```
-
-4. **Two-Phase Approach**:
-   - First run: Fast detection to identify problematic kernels
-   - Second run: Detailed analysis on specific kernels
-
-### Performance Data (from GPU-FPX paper)
-
-On a benchmark of 151 HPC and ML programs:
-- Over 60% experienced less than 10x slowdown
-- Sampling with factor 64 reduced geometric mean slowdown to ~5x
-- Compared to BinFPE: 16x faster geometric-mean runtime
+Warpscope has lower overhead than Nixnan because it only instruments 2 points per kernel (start + exits), while Nixnan instruments every floating-point instruction.
 
 ---
 
 ## Troubleshooting <a name="troubleshooting"></a>
 
-### Common Issues
+### "instrumentation function not found in binary"
 
-#### 1. Crashes with LINE_INFO=1
+The tool's SM architecture doesn't match your GPU. Rebuild with the correct ARCH:
 
-**Symptom**: Program crashes when enabling source line information.
-
-**Solution**:
 ```bash
-LINE_INFO=0 LD_PRELOAD=./nixnan.so ./my_program
+# Check your GPU's compute capability
+nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+
+# Rebuild (e.g., for compute capability 8.9)
+cd nvbit_release/tools/warpscope && make clean && make ARCH=sm_89
 ```
 
-The line info feature may not work with all programs. Use without it for initial detection.
+### All warps show 100% utilization
 
-#### 2. "/unknown_path" in Output
+This means the kernel is well-balanced — no idle warps to exploit. This is expected for:
+- Non-causal (encoder) attention
+- Element-wise operations
+- Well-optimized matrix multiplies
 
-**Symptom**: Exception locations show `/unknown_path` instead of source files.
+### Crashes with LINE_INFO=1 (nixnan)
 
-**Solution**: Recompile your CUDA code with debug information:
+Disable line info: `LINE_INFO=0 LD_PRELOAD=nixnan.so ./your_program`
+
+### Output mixed with program output
+
+Redirect to a file:
 ```bash
-nvcc -lineinfo -g your_program.cu -o your_program
+WARPSCOPE_LOGFILE=warpscope.log LD_PRELOAD=warpscope.so ./your_program
+LOGFILE=nixnan.log LD_PRELOAD=nixnan.so ./your_program
 ```
 
-#### 3. NVBit Version Mismatch
+### NVBit: only one tool per process
 
-**Symptom**: Tool fails to load or produces errors about NVBit version.
-
-**Solution**: Ensure your CUDA driver and NVBit versions are compatible. Check:
-```bash
-nvidia-smi  # Check driver version
-nvcc --version  # Check CUDA toolkit version
-```
-
-#### 4. Missing Exceptions in Closed-Source Libraries
-
-**Symptom**: Exceptions detected but no source location available.
-
-**Explanation**: For closed-source libraries (cuBLAS, cuDNN, etc.), source information is unavailable. The tool still detects exceptions but can only report kernel names.
-
-**Workaround**: Use the kernel name to identify which library function is causing issues, then check your inputs to that function.
-
-#### 5. Very High Overhead
-
-**Symptom**: Program runs extremely slowly.
-
-**Solution**: Use sampling:
-```bash
-SAMPLING=128 LD_PRELOAD=./nixnan.so ./my_program
-```
-
-#### 6. Output Mixed with Program Output
-
-**Symptom**: Nixnan output interferes with program output.
-
-**Solution**: Redirect nixnan output to a file:
-```bash
-LOGFILE=/tmp/nixnan.log LD_PRELOAD=./nixnan.so ./my_program
-```
+You cannot `LD_PRELOAD` both `warpscope.so` and `nixnan.so` simultaneously. Run them in separate executions.
 
 ---
 
@@ -583,67 +421,21 @@ LOGFILE=/tmp/nixnan.log LD_PRELOAD=./nixnan.so ./my_program
 
 ### Papers
 
-1. **GPU-FPX Paper**: Li, X., Laguna, I., Fang, B., Swirydowicz, K., Li, A., & Gopalakrishnan, G. (2023). "Design and Evaluation of GPU-FPX: A Low-Overhead tool for Floating-Point Exception Detection in NVIDIA GPUs." *HPDC '23*. https://doi.org/10.1145/3588195.3592991
+1. **GPU-FPX**: Li, X., et al. (2023). "Design and Evaluation of GPU-FPX: A Low-Overhead Tool for Floating-Point Exception Detection in NVIDIA GPUs." *HPDC '23*. https://doi.org/10.1145/3588195.3592991
 
-2. **Array Programming Paper**: Li, X., Baranowski, M., Dam, H., & Gopalakrishnan, G. (2025). "Array Programming on GPUs: Challenges and Opportunities." *ARRAY '25*. https://doi.org/10.1145/3736112.3736144
+2. **Flash Attention 2**: Dao, T. (2023). "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning."
 
-3. **NVBit**: Villa, O., Stephenson, M., Nellans, D., & Keckler, S. W. (2019). "NVBit: A Dynamic Binary Instrumentation Framework for NVIDIA GPUs." *MICRO '19*.
+3. **Flash Attention 3**: Shah, J., Dao, T., et al. (2024). "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision."
 
-### Related Tools
+4. **NVBit**: Villa, O., et al. (2019). "NVBit: A Dynamic Binary Instrumentation Framework for NVIDIA GPUs." *MICRO '19*.
 
-- **GPU-FPX**: https://github.com/LLNL/GPU-FPX
-- **FPChecker**: LLVM-based exception detection for Clang-compiled CUDA
-- **BinFPE**: Earlier SASS-level binary instrumentation tool
-- **FloatGuard**: Exception detection for AMD GPUs
+### Tools and Resources
 
-### IEEE Standards
-
-- IEEE 754-2008: Standard for Floating-Point Arithmetic
-- IEEE 754-2019: Latest revision with updated NaN handling
-
-### Useful Resources
-
-- NVIDIA CUDA Floating-Point Documentation: https://docs.nvidia.com/cuda/floating-point/
-- IEEE-754 Floating Point Converter: https://www.h-schmidt.net/FloatConverter/IEEE754.html
+- [NVBit](https://github.com/NVlabs/NVBit) — NVIDIA Binary Instrumentation Tool
+- [GPU-FPX](https://github.com/LLNL/GPU-FPX) — Original FP exception detector
+- [SC'25 Tutorial on FP Analysis Tools](https://fpanalysistools.org)
+- [NVIDIA CUDA FP Documentation](https://docs.nvidia.com/cuda/floating-point/)
 
 ---
 
-## Appendix: SASS Instruction Reference
-
-Nixnan instruments the following SASS floating-point instructions:
-
-### Computation Opcodes
-
-| Instruction | Description |
-|-------------|-------------|
-| FADD | FP32 Add |
-| FADD32I | FP32 Add (immediate) |
-| FFMA | FP32 Fused Multiply and Add |
-| FFMA32I | FP32 Fused Multiply and Add (immediate) |
-| FMUL | FP32 Multiply |
-| FMUL32I | FP32 Multiply (immediate) |
-| MUFU | FP32 Multi Function Operation (sin, cos, sqrt, rcp, etc.) |
-| DADD | FP64 Add |
-| DFMA | FP64 Fused Multiply Add |
-| DMUL | FP64 Multiply |
-
-### Control Flow Opcodes
-
-| Instruction | Description |
-|-------------|-------------|
-| FSEL | Floating Point Select |
-| FSET | FP32 Compare And Set |
-| FSETP | FP32 Compare And Set Predicate |
-| FMNMX | FP32 Minimum/Maximum |
-| DSETP | FP64 Compare And Set Predicate |
-
-### Tensor Core Instructions
-
-| Instruction | Description |
-|-------------|-------------|
-| HMMA | Half-precision Matrix Multiply-Accumulate |
-| IMMA | Integer Matrix Multiply-Accumulate |
-
----
-
-*This tutorial is part of the nixnan project. For the latest updates, visit: https://github.com/parfloat/nixnan*
+*This tutorial covers both the Warpscope idle warp detector and the Nixnan FP exception detector. For tool-specific details, see `README.md` and `CLAUDE.md`.*

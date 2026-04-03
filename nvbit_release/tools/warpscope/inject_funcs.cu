@@ -10,13 +10,13 @@ using namespace warpscope;
 // Injected at IPOINT_BEFORE on the first instruction of each kernel.
 extern "C" __device__ __noinline__ void
 warpscope_timer_start(int pred, uint64_t pbuffer) {
-    int active_mask = __ballot_sync(__activemask(), 1);
+    int active_mask = __ballot_sync(__activemask(), 1); //gets a bitmask of which threads(lanes) in the warp are active
     const int laneid = get_laneid();
-    const int first_laneid = __ffs(active_mask) - 1;
+    const int first_laneid = __ffs(active_mask) - 1; //first active lane id 
 
     if (first_laneid == laneid) {
         warp_timing_buffer *buf = (warp_timing_buffer *)pbuffer;
-        uint32_t slot = atomicAdd(&buf->count, 1);
+        uint32_t slot = atomicAdd(&buf->count, 1); //atomic adds buf->count  to claim a slot in the shared buffer
         if (slot < WS_MAX_WARPS) {
             int4 cta = get_ctaid();
             buf->records[slot].start_clock = clock64();

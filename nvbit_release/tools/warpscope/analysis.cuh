@@ -22,10 +22,18 @@ struct warp_result {
     uint32_t active_end;
 };
 
+// Overhead timing record (populated by warpscope.cu when WARPSCOPE_BENCHMARK=1)
+struct overhead_record {
+    double sync_ms;      // cudaDeviceSynchronize() time
+    double analysis_ms;  // analysis::on_kernel_exit() time
+    double spec_ms;      // specialization::on_kernel_exit() time
+};
+
 void init(float threshold);
 void tool_init(CUcontext ctx);
 void on_kernel_launch(const std::string &kernel_name);
 void on_kernel_exit();
+void record_overhead(const overhead_record &rec);
 void term(CUcontext ctx);
 
 // Get the parsed results and max duration from the most recent kernel analysis.

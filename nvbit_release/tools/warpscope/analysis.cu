@@ -42,6 +42,7 @@ struct kernel_stats {
     std::vector<std::tuple<size_t, size_t, float>> run_history; // (total, idle, fraction)
     std::map<warp_key, uint32_t> idle_counts;
     std::map<warp_key, uint32_t> appearance_counts;
+    std::vector<overhead_record> overhead_history;
 };
 static std::map<std::string, kernel_stats> all_kernel_stats;
 
@@ -184,6 +185,11 @@ void on_kernel_exit() {
     analyse_kernel();
 }
 
+void record_overhead(const overhead_record &rec) {
+    auto &ks = all_kernel_stats[current_kernel_name_str];
+    ks.overhead_history.push_back(rec);
+}
+
 const std::vector<warp_result>& get_last_results() {
     return last_results;
 }
@@ -271,6 +277,40 @@ void term(CUcontext ctx) {
         }
         wsout_stream().flags(old_flags);
     }
+    // Print overhead summary if any benchmark data was collected
+    bool has_overhead = false;
+    for (auto &[kname, ks] : all_kernel_stats) {
+        if (!ks.overhead_history.empty()) { has_overhead = true; break; }
+    }
+    if (has_overhead) {
+        wsout() << "\n---------- Instrumentation Overhead Summary ----------\n";
+        for (auto &[kname, ks] : all_kernel_stats) {
+            if (ks.overhead_history.empty()) continue;
+            double total_sync = 0, total_analysis = 0, total_spec = 0;
+            for (auto &o : ks.overhead_history) {
+                total_sync += o.sync_ms;
+                total_analysis += o.analysis_ms;
+                total_spec += o.spec_ms;
+            }
+            size_t n = ks.overhead_history.size();
+            double avg_sync = total_sync / n;
+            double avg_analysis = total_analysis / n;
+            double avg_spec = total_spec / n;
+            double avg_total = avg_sync + avg_analysis + avg_spec;
+
+            auto old = wsout_stream().flags();
+            wsout() << "\nKernel [" << kname << "] - " << n << " launch(es)\n";
+            wsout() << std::fixed << std::setprecision(3);
+            wsout() << "  Avg host overhead per launch: " << avg_total << " ms\n";
+            wsout() << "    cudaDeviceSynchronize:  " << avg_sync << " ms\n";
+            wsout() << "    Analysis:               " << avg_analysis << " ms\n";
+            wsout() << "    Specialization:         " << avg_spec << " ms\n";
+            wsout() << "  Total accumulated overhead: " << (total_sync + total_analysis + total_spec) << " ms\n";
+            wsout_stream().flags(old);
+        }
+        wsout() << "\n------------------------------------------------------\n";
+    }
+
     wsout() << "\n=================================================\n";
 }
 

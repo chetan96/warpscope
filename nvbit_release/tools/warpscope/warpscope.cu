@@ -14,6 +14,7 @@
 #include "nvbit.h"
 #include "utils/channel.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -28,6 +29,7 @@ static __managed__ warpscope::warp_timing_buffer ws_timing_buffer;
 
 // ---- State -----------------------------------------------------------------
 static int verbose = 0;
+static bool benchmark_mode = false;
 static std::unordered_set<CUfunction> instrumented_functions;
 static std::unordered_set<std::string> kernel_whitelist;
 
@@ -86,6 +88,9 @@ void nvbit_at_init() {
     env = getenv("WARPSCOPE_JSON");
     if (env && env[0] != '\0') json_path = env;
 
+    env = getenv("WARPSCOPE_BENCHMARK");
+    if (env && atoi(env)) benchmark_mode = true;
+
     env = getenv("WARPSCOPE_KERNEL");
     parse_kernel_whitelist(env);
 
@@ -98,6 +103,7 @@ void nvbit_at_init() {
     wsout() << pad << "\n";
     wsout() << "Warpscope — Idle Warp Detector & Specialization Advisor\n";
     wsout() << "Threshold: " << (int)(threshold * 100) << "% | Verbose: " << verbose;
+    if (benchmark_mode) wsout_stream() << " | Benchmark: ON";
     if (!json_path.empty()) wsout_stream() << " | JSON: " << json_path;
     if (!kernel_whitelist.empty()) {
         wsout_stream() << " | Kernels: ";
@@ -168,13 +174,37 @@ void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid,
             nvbit_enable_instrumented(ctx, p->f, enable);
 
         } else {
+            using clock = std::chrono::high_resolution_clock;
+            auto t0 = benchmark_mode ? clock::now() : clock::time_point{};
+
             cudaDeviceSynchronize();
             cudaError_t err = cudaGetLastError();
             if (err != cudaSuccess) {
                 wsout() << "Kernel error: " << cudaGetErrorString(err) << "\n";
             }
+
+            auto t1 = benchmark_mode ? clock::now() : clock::time_point{};
             warpscope::analysis::on_kernel_exit();
+
+            auto t2 = benchmark_mode ? clock::now() : clock::time_point{};
             warpscope::specialization::on_kernel_exit();
+
+            if (benchmark_mode) {
+                auto t3 = clock::now();
+                auto to_ms = [](auto d) {
+                    return std::chrono::duration<double, std::milli>(d).count();
+                };
+                warpscope::analysis::overhead_record rec{
+                    to_ms(t1 - t0), to_ms(t2 - t1), to_ms(t3 - t2)
+                };
+                warpscope::analysis::record_overhead(rec);
+
+                if (verbose) {
+                    wsout() << "[benchmark] sync=" << rec.sync_ms
+                            << "ms analysis=" << rec.analysis_ms
+                            << "ms spec=" << rec.spec_ms << "ms\n";
+                }
+            }
         }
     }
 }

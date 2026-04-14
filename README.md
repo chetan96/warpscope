@@ -66,6 +66,7 @@ WARPSCOPE_VERBOSE=1 LD_PRELOAD=warpscope.so ./your_program
 | `WARPSCOPE_LOGFILE` | stderr | Path to redirect human-readable output |
 | `WARPSCOPE_JSON` | (none) | Path for JSON recommendation report |
 | `WARPSCOPE_KERNEL` | (all) | Comma-separated kernel name whitelist |
+| `WARPSCOPE_BENCHMARK` | `0` | If `1`, record per-launch `cudaDeviceSynchronize`/analysis/specialization timings and print an overhead summary at exit |
 
 ## Example Output
 
@@ -134,9 +135,15 @@ The `examples/` directory contains test cases:
 | File | Description |
 |---|---|
 | `flash_attention_causal.cu` | Causal (decoder) Flash Attention 2 with shared memory -- shows ~50% idle warps from the triangular causal mask |
+| `flash_attention_bench.cu` | Benchmark-focused Flash Attention variant for latency/throughput measurements |
+| `flash_attention_specialized.cu` | Hand-written producer/consumer warp specialized variant (comparison baseline) |
+| `tiled_matmul.cu` | Baseline FP32 tiled matmul with square, tall-skinny, short-wide, and non-aligned shapes -- non-aligned shapes produce tail idle warps |
+| `tiled_matmul_specialized.cu` | Double-buffered and tail-specialized matmul variants for comparison |
 | `idle_warp_test.cu` | Synthetic tests: imbalanced, divergent, and tail-effect kernels |
 | `idle_warp_ml.cu` | Real ML patterns: MoE routing, padded batch attention, speculative decoding, sparse attention, token pruning |
 | `basic.cu` | Tensor core FP16 matrix multiply (from nixnan) |
+
+The `benchmarks/` directory contains automation scripts (`matmul_bench.sh`, `flash_attn_bench.sh`, `overhead.sh`) that sweep configurations and record baseline vs. instrumented timings.
 
 Compile and run any example:
 
@@ -145,6 +152,10 @@ cd examples
 nvcc -arch=compute_89 -lineinfo flash_attention_causal.cu -o flash_attention_causal
 LD_PRELOAD=../warpscope.so ./flash_attention_causal
 ```
+
+## Overhead
+
+Warpscope adds roughly **2–4× wall-clock dilation** on instrumented kernels (measured on RTX 4090 / sm_89): 2.2× on `flash_attention_causal`, 3.6× on `idle_warp_test`. The overhead is dominated by the forced `cudaDeviceSynchronize()` after every launch and the O(n) linear scan in the injected `warpscope_timer_end` device function. Host-side analysis and specialization are under 1 ms per kernel. Acceptable for offline profiling; not for production deployment. See `dilation.txt` for the full breakdown.
 
 ## How It Works
 
